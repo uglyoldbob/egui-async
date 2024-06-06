@@ -1,3 +1,4 @@
+use async_winit as winit;
 use egui::ViewportBuilder;
 
 /// Can be used to store native window settings (position and size).
@@ -18,18 +19,18 @@ pub struct WindowSettings {
 }
 
 impl WindowSettings {
-    pub fn from_window(egui_zoom_factor: f32, window: &winit::window::Window) -> Self {
+    pub async fn from_window<TS: async_winit::ThreadSafety>(egui_zoom_factor: f32, window: &winit::window::Window<TS>) -> Self {
         let inner_size_points = window
-            .inner_size()
+            .inner_size().await
             .to_logical::<f32>(egui_zoom_factor as f64 * window.scale_factor());
 
         let inner_position_pixels = window
-            .inner_position()
+            .inner_position().await
             .ok()
             .map(|p| egui::pos2(p.x as f32, p.y as f32));
 
         let outer_position_pixels = window
-            .outer_position()
+            .outer_position().await
             .ok()
             .map(|p| egui::pos2(p.x as f32, p.y as f32));
 
@@ -37,7 +38,7 @@ impl WindowSettings {
             inner_position_pixels,
             outer_position_pixels,
 
-            fullscreen: window.fullscreen().is_some(),
+            fullscreen: window.fullscreen().await.is_some(),
 
             inner_size_points: Some(egui::vec2(
                 inner_size_points.width,
@@ -76,12 +77,12 @@ impl WindowSettings {
         viewport_builder
     }
 
-    pub fn initialize_window(&self, window: &winit::window::Window) {
+    pub async fn initialize_window<TS: async_winit::ThreadSafety>(&self, window: &winit::window::Window<TS>) {
         if cfg!(target_os = "macos") {
             // Mac sometimes has problems restoring the window to secondary monitors
             // using only `WindowBuilder::with_position`, so we need this extra step:
             if let Some(pos) = self.outer_position_pixels {
-                window.set_outer_position(winit::dpi::PhysicalPosition { x: pos.x, y: pos.y });
+                window.set_outer_position(winit::dpi::PhysicalPosition { x: pos.x, y: pos.y }).await;
             }
         }
     }
@@ -100,10 +101,10 @@ impl WindowSettings {
         }
     }
 
-    pub fn clamp_position_to_monitors<E>(
+    pub async fn clamp_position_to_monitors<TS: async_winit::ThreadSafety>(
         &mut self,
         egui_zoom_factor: f32,
-        event_loop: &winit::event_loop::EventLoopWindowTarget<E>,
+        event_loop: &winit::event_loop::EventLoopWindowTarget<TS>,
     ) {
         // If the app last ran on two monitors and only one is now connected, then
         // the given position is invalid.
@@ -119,30 +120,34 @@ impl WindowSettings {
         };
 
         if let Some(pos_px) = &mut self.inner_position_pixels {
-            clamp_pos_to_monitors(egui_zoom_factor, event_loop, inner_size_points, pos_px);
+            clamp_pos_to_monitors(egui_zoom_factor, event_loop, inner_size_points, pos_px).await;
         }
         if let Some(pos_px) = &mut self.outer_position_pixels {
-            clamp_pos_to_monitors(egui_zoom_factor, event_loop, inner_size_points, pos_px);
+            clamp_pos_to_monitors(egui_zoom_factor, event_loop, inner_size_points, pos_px).await;
         }
     }
 }
 
-fn clamp_pos_to_monitors<E>(
+async fn find_active_monitor<TS: async_winit::ThreadSafety>(
     egui_zoom_factor: f32,
-    event_loop: &winit::event_loop::EventLoopWindowTarget<E>,
+    event_loop: &async_winit::event_loop::EventLoopWindowTarget<TS>,
     window_size_pts: egui::Vec2,
-    position_px: &mut egui::Pos2,
-) {
+    position_px: &egui::Pos2,
+) -> Option<async_winit::monitor::MonitorHandle> {
     crate::profile_function!();
 
-    let monitors = event_loop.available_monitors();
+    let monitors = event_loop.available_monitors().await;
+
+    let pm = event_loop.primary_monitor().await;
+    let monitor = if pm.is_some() {
+        pm
+    } else {
+        event_loop.available_monitors().await.next()
+    };
 
     // default to primary monitor, in case the correct monitor was disconnected.
-    let Some(mut active_monitor) = event_loop
-        .primary_monitor()
-        .or_else(|| event_loop.available_monitors().next())
-    else {
-        return; // no monitors 🤷
+    let Some(mut active_monitor) = monitor else {
+        return None; // no monitors 🤷
     };
 
     for monitor in monitors {
@@ -158,6 +163,23 @@ fn clamp_pos_to_monitors<E>(
             active_monitor = monitor;
         }
     }
+
+    Some(active_monitor)
+}
+
+async fn clamp_pos_to_monitors<TS: async_winit::ThreadSafety>(
+    egui_zoom_factor: f32,
+    event_loop: &async_winit::event_loop::EventLoopWindowTarget<TS>,
+    window_size_pts: egui::Vec2,
+    position_px: &mut egui::Pos2,
+) {
+    crate::profile_function!();
+
+    let Some(active_monitor) =
+        find_active_monitor(egui_zoom_factor, event_loop, window_size_pts, position_px).await
+    else {
+        return; // no monitors 🤷
+    };
 
     let mut window_size_px =
         window_size_pts * (egui_zoom_factor * active_monitor.scale_factor() as f32);

@@ -9,6 +9,9 @@
 
 #![allow(clippy::manual_range_contains)]
 
+use async_winit::event::{MouseInput, MouseWheel};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 #[cfg(feature = "accesskit")]
 pub use accesskit_winit;
@@ -16,7 +19,7 @@ pub use egui;
 #[cfg(feature = "accesskit")]
 use egui::accesskit;
 use egui::{Pos2, Rect, Vec2, ViewportBuilder, ViewportCommand, ViewportId, ViewportInfo};
-pub use winit;
+pub use async_winit as winit;
 
 pub mod clipboard;
 mod window_settings;
@@ -34,13 +37,13 @@ use winit::{
     window::{CursorGrabMode, Window, WindowButtons, WindowLevel},
 };
 
-pub fn screen_size_in_pixels(window: &Window) -> egui::Vec2 {
-    let size = window.inner_size();
+pub async fn screen_size_in_pixels<TS: async_winit::ThreadSafety>(window: &Window<TS>) -> egui::Vec2 {
+    let size = window.inner_size().await;
     egui::vec2(size.width as f32, size.height as f32)
 }
 
 /// Calculate the `pixels_per_point` for a given window, given the current egui zoom factor
-pub fn pixels_per_point(egui_ctx: &egui::Context, window: &Window) -> f32 {
+pub fn pixels_per_point<TS: async_winit::ThreadSafety>(egui_ctx: &egui::Context, window: &Window<TS>) -> f32 {
     let native_pixels_per_point = window.scale_factor() as f32;
     let egui_zoom_factor = egui_ctx.zoom_factor();
     egui_zoom_factor * native_pixels_per_point
@@ -223,7 +226,7 @@ impl State {
     /// You need to set [`egui::RawInput::viewports`] yourself though.
     /// Use [`update_viewport_info`] to update the info for each
     /// viewport.
-    pub fn take_egui_input(&mut self, window: &Window) -> egui::RawInput {
+    pub async fn take_egui_input<TS: async_winit::ThreadSafety>(&mut self, window: &Window<TS>) -> egui::RawInput {
         crate::profile_function!();
 
         self.egui_input.time = Some(self.start_time.elapsed().as_secs_f64());
@@ -231,7 +234,7 @@ impl State {
         // On Windows, a minimized window will have 0 width and height.
         // See: https://github.com/rust-windowing/winit/issues/208
         // This solves an issue where egui window positions would be changed when minimizing on Windows.
-        let screen_size_in_pixels = screen_size_in_pixels(window);
+        let screen_size_in_pixels = screen_size_in_pixels(window).await;
         let screen_size_in_points =
             screen_size_in_pixels / pixels_per_point(&self.egui_ctx, window);
 
@@ -251,12 +254,365 @@ impl State {
         self.egui_input.take()
     }
 
+    pub fn register_event_handlers(
+        s: &Arc<Mutex<Self>>,
+        window: &Arc<async_winit::window::Window<async_winit::ThreadSafe>>,
+    ) {
+        {
+            let s2 = s.clone();
+            let window2 = std::sync::Arc::downgrade(window);
+            window.scale_factor_changed().wait_direct(move |sfc| {
+                let s2 = s2.clone();
+                let window2 = window2.clone();
+                {
+                    {
+                        let mut s4 = s2.lock();
+                        let vp = s4.viewport_id;
+                        s4.egui_input
+                            .viewports
+                            .entry(vp)
+                            .or_default()
+                            .native_pixels_per_point
+                            .as_mut()
+                            .map(|a| *a *= sfc.scale_factor as f32);
+                    }
+                    if let Some(window) = window2.upgrade() {
+                        window.request_redraw();
+                    }
+                    false
+                }
+            });
+        }
+        {
+            let s2 = s.clone();
+            let window2 = std::sync::Arc::downgrade(window);
+            window.mouse_input().wait_direct(move |m: MouseInput| {
+                let s2 = s2.clone();
+                let window2 = window2.clone();
+                {
+                    let done = {
+                        let mut s = s2.lock();
+                        s.on_mouse_button_input(m.state, m.button);
+                        let done = s.egui_ctx.wants_pointer_input();
+                        done
+                    };
+                    if let Some(window) = window2.upgrade() {
+                        window.request_redraw();
+                    }
+                    done
+                }
+            });
+        }
+        {
+            let s2 = s.clone();
+            let window2 = std::sync::Arc::downgrade(window);
+            window.mouse_wheel().wait_direct(move |m: MouseWheel| {
+                let s2 = s2.clone();
+                let window = window2.clone();
+                {
+                    let done = {
+                        let mut s = s2.lock();
+                        let r = s.egui_ctx.wants_pointer_input();
+                        if let Some(window) = window.upgrade() {
+                            s.on_mouse_wheel(&window, m.delta);
+                        }
+                        r
+                    };
+                    if let Some(window) = window.upgrade() {
+                        window.request_redraw();
+                    }
+                    done
+                }
+            });
+        }
+        {
+            let s2 = s.clone();
+            let window2 = std::sync::Arc::downgrade(window);
+            window.cursor_moved().wait_direct(move |c| {
+                let s2 = s2.clone();
+                let window = window2.clone();
+                {
+                    let done = {
+                        let mut s = s2.lock();
+                        let done = s.egui_ctx.is_using_pointer();
+                        if let Some(window) = window.upgrade() {
+                            s.on_cursor_moved(&window, c.position);
+                        }
+                        done
+                    };
+                    if let Some(window) = window.upgrade() {
+                        window.request_redraw();
+                    }
+                    done
+                }
+            });
+        }
+        {
+            let s2 = s.clone();
+            let window2 = std::sync::Arc::downgrade(window);
+            window.cursor_left().wait_direct(move |_c| {
+                let s2 = s2.clone();
+                let window = window2.clone();
+                {
+                    {
+                        let mut s = s2.lock();
+                        s.pointer_pos_in_points = None;
+                        s.egui_input.events.push(egui::Event::PointerGone);
+                    }
+                    if let Some(window) = window.upgrade() {
+                        println!("Cursor left {:?}", window.id());
+                        window.request_redraw();
+                    }
+                    false
+                }
+            });
+        }
+        {
+            let window2 = std::sync::Arc::downgrade(window);
+            window.cursor_entered().wait_direct(move |_c| {
+                let window = window2.clone();
+                {
+                    if let Some(window) = window.upgrade() {
+                        println!("Cursor entered {:?}", window.id());
+                        window.request_redraw();
+                    }
+                    false
+                }
+            });
+        }
+        {
+            let s2 = s.clone();
+            let window2 = std::sync::Arc::downgrade(window);
+            window.touch().wait_direct(move |c| {
+                let s2 = s2.clone();
+                let window = window2.clone();
+                {
+                    let r = {
+                        let s = s2.lock();
+                        let r = match c.phase {
+                            async_winit::event::TouchPhase::Started
+                            | async_winit::event::TouchPhase::Ended
+                            | async_winit::event::TouchPhase::Cancelled => {
+                                s.egui_ctx.wants_pointer_input()
+                            }
+                            async_winit::event::TouchPhase::Moved => s.egui_ctx.is_using_pointer(),
+                        };
+                        r
+                    };
+                    if let Some(window) = window.upgrade() {
+                        window.request_redraw();
+                    }
+                    r
+                }
+            });
+        }
+        /* TODO: add this back in once ime changes get published to egui
+        {
+            let s2 = s.clone();
+            let window2 = std::sync::Arc::downgrade(window);
+            window.ime().wait_direct(move |ime| {
+                let s2 = s2.clone();
+                let window = window2.clone();
+                {
+                    let r = {
+                        let mut s = s2.lock();
+                        match ime {
+                            async_winit::event::Ime::Enabled => {}
+                            async_winit::event::Ime::Preedit(_, None) => {
+                                s.ime_event_enable();
+                            }
+                            async_winit::event::Ime::Preedit(text, Some(_cursor)) => {
+                                s.ime_event_enable();
+                                s.egui_input
+                                    .events
+                                    .push(egui::Event::Ime(egui::ImeEvent::Preedit(text.clone())));
+                            }
+                            async_winit::event::Ime::Commit(text) => {
+                                s.egui_input
+                                    .events
+                                    .push(egui::Event::Ime(egui::ImeEvent::Commit(text.clone())));
+                                s.ime_event_disable();
+                            }
+                            async_winit::event::Ime::Disabled => {
+                                s.ime_event_disable();
+                            }
+                        };
+                        s.egui_ctx.wants_keyboard_input()
+                    };
+                    if let Some(window) = window.upgrade() {
+                        window.request_redraw();
+                    }
+                    r
+                }
+            });
+        }
+        */
+        {
+            let s2 = s.clone();
+            let window2 = std::sync::Arc::downgrade(window);
+            window.keyboard_input().wait_direct(move |ki| {
+                let s2 = s2.clone();
+                let window = window2.clone();
+                {
+                    let consumed = {
+                        let mut s = s2.lock();
+                        s.on_keyboard_input(&ki.event);
+
+                        // When pressing the Tab key, egui focuses the first focusable element, hence Tab always consumes.
+                        s.egui_ctx.wants_keyboard_input()
+                            || ki.event.logical_key
+                                == async_winit::keyboard::Key::Named(
+                                    async_winit::keyboard::NamedKey::Tab,
+                                )
+                    };
+                    if let Some(window) = window.upgrade() {
+                        window.request_redraw();
+                    }
+                    consumed
+                }
+            });
+        }
+        {
+            let s2 = s.clone();
+            let window2 = std::sync::Arc::downgrade(window);
+            window.focused().wait_direct(move |focused| {
+                let s2 = s2.clone();
+                let window = window2.clone();
+                {
+                    {
+                        let mut s = s2.lock();
+                        s.egui_input.focused = focused;
+                        s.egui_input
+                            .events
+                            .push(egui::Event::WindowFocused(focused));
+                    }
+                    if let Some(window) = window.upgrade() {
+                        window.request_redraw();
+                    }
+                    false
+                }
+            });
+        }
+        {
+            let s2 = s.clone();
+            let window2 = std::sync::Arc::downgrade(window);
+            window.modifiers_changed().wait_direct(move |state| {
+                let s2 = s2.clone();
+                let window = window2.clone();
+                {
+                    {
+                        let mut s = s2.lock();
+
+                        let alt = state.alt_key();
+                        let ctrl = state.control_key();
+                        let shift = state.shift_key();
+                        let super_ = state.super_key();
+
+                        s.egui_input.modifiers.alt = alt;
+                        s.egui_input.modifiers.ctrl = ctrl;
+                        s.egui_input.modifiers.shift = shift;
+                        s.egui_input.modifiers.mac_cmd = cfg!(target_os = "macos") && super_;
+                        s.egui_input.modifiers.command = if cfg!(target_os = "macos") {
+                            super_
+                        } else {
+                            ctrl
+                        };
+                    }
+                    if let Some(window) = window.upgrade() {
+                        window.request_redraw();
+                    }
+                    false
+                }
+            });
+        }
+        {
+            let window2 = std::sync::Arc::downgrade(window);
+            window.occluded().wait_direct(move |_occluded| {
+                let window = window2.clone();
+                {
+                    if let Some(window) = window.upgrade() {
+                        window.request_redraw();
+                    }
+                    false
+                }
+            });
+        }
+        {
+            let window2 = std::sync::Arc::downgrade(window);
+            window.resized().wait_direct(move |_size| {
+                let window = window2.clone();
+                {
+                    if let Some(window) = window.upgrade() {
+                        window.request_redraw();
+                    }
+                    false
+                }
+            });
+        }
+        {
+            let window2 = std::sync::Arc::downgrade(window);
+            window.moved().wait_direct(move |_position| {
+                let window = window2.clone();
+                {
+                    if let Some(window) = window.upgrade() {
+                        window.request_redraw();
+                    }
+                    false
+                }
+            });
+        }
+        {
+            let window2 = std::sync::Arc::downgrade(window);
+            window.theme_changed().wait_direct(move |_theme| {
+                let window = window2.clone();
+                {
+                    if let Some(window) = window.upgrade() {
+                        window.request_redraw();
+                    }
+                    false
+                }
+            });
+        }
+        {
+            let window2 = std::sync::Arc::downgrade(window);
+            window.touchpad_pressure().wait_direct(move |_pressure| {
+                let window = window2.clone();
+                {
+                    if let Some(window) = window.upgrade() {
+                        window.request_redraw();
+                    }
+                    false
+                }
+            });
+        }
+        {
+            let s2 = s.clone();
+            let window2 = std::sync::Arc::downgrade(window);
+            window.touchpad_magnify().wait_direct(move |magnify| {
+                let s2 = s2.clone();
+                let window = window2.clone();
+                {
+                    let r = {
+                        let mut s = s2.lock();
+                        let zoom_factor = (magnify.delta as f32).exp();
+                        s.egui_input.events.push(egui::Event::Zoom(zoom_factor));
+                        s.egui_ctx.wants_pointer_input()
+                    };
+                    if let Some(window) = window.upgrade() {
+                        window.request_redraw();
+                    }
+                    r
+                }
+            });
+        }
+    }
+
     /// Call this when there is a new event.
     ///
     /// The result can be found in [`Self::egui_input`] and be extracted with [`Self::take_egui_input`].
-    pub fn on_window_event(
+    pub fn on_window_event<TS: async_winit::ThreadSafety>(
         &mut self,
-        window: &Window,
+        window: &Window<TS>,
         event: &winit::event::WindowEvent,
     ) -> EventResponse {
         crate::profile_function!(short_window_event_description(event));
@@ -537,9 +893,9 @@ impl State {
         }
     }
 
-    fn on_cursor_moved(
+    fn on_cursor_moved<TS: async_winit::ThreadSafety>(
         &mut self,
-        window: &Window,
+        window: &Window<TS>,
         pos_in_pixels: winit::dpi::PhysicalPosition<f64>,
     ) {
         let pixels_per_point = pixels_per_point(&self.egui_ctx, window);
@@ -571,7 +927,7 @@ impl State {
         }
     }
 
-    fn on_touch(&mut self, window: &Window, touch: &winit::event::Touch) {
+    fn on_touch<TS: async_winit::ThreadSafety>(&mut self, window: &Window<TS>, touch: &winit::event::Touch) {
         let pixels_per_point = pixels_per_point(&self.egui_ctx, window);
 
         // Emit touch event
@@ -635,7 +991,7 @@ impl State {
         }
     }
 
-    fn on_mouse_wheel(&mut self, window: &Window, delta: winit::event::MouseScrollDelta) {
+    fn on_mouse_wheel<TS: async_winit::ThreadSafety>(&mut self, window: &Window<TS>, delta: winit::event::MouseScrollDelta) {
         let pixels_per_point = pixels_per_point(&self.egui_ctx, window);
 
         {
@@ -784,9 +1140,9 @@ impl State {
     /// * open any clicked urls
     /// * update the IME
     /// *
-    pub fn handle_platform_output(
+    pub async fn handle_platform_output<TS: async_winit::ThreadSafety>(
         &mut self,
-        window: &Window,
+        window: &Window<TS>,
         platform_output: egui::PlatformOutput,
     ) {
         crate::profile_function!();
@@ -802,7 +1158,7 @@ impl State {
             accesskit_update,
         } = platform_output;
 
-        self.set_cursor_icon(window, cursor_icon);
+        self.set_cursor_icon(window, cursor_icon).await;
 
         if let Some(open_url) = open_url {
             open_url_in_browser(&open_url.url);
@@ -816,7 +1172,7 @@ impl State {
         if self.allow_ime != allow_ime {
             self.allow_ime = allow_ime;
             crate::profile_scope!("set_ime_allowed");
-            window.set_ime_allowed(allow_ime);
+            window.set_ime_allowed(allow_ime).await;
         }
 
         if let Some(ime) = ime {
@@ -851,7 +1207,7 @@ impl State {
         }
     }
 
-    fn set_cursor_icon(&mut self, window: &Window, cursor_icon: egui::CursorIcon) {
+    async fn set_cursor_icon<TS: async_winit::ThreadSafety>(&mut self, window: &Window<TS>, cursor_icon: egui::CursorIcon) {
         if self.current_cursor_icon == Some(cursor_icon) {
             // Prevent flickering near frame boundary when Windows OS tries to control cursor icon for window resizing.
             // On other platforms: just early-out to save CPU.
@@ -863,10 +1219,10 @@ impl State {
             self.current_cursor_icon = Some(cursor_icon);
 
             if let Some(winit_cursor_icon) = translate_cursor(cursor_icon) {
-                window.set_cursor_visible(true);
-                window.set_cursor_icon(winit_cursor_icon);
+                window.set_cursor_visible(true).await;
+                window.set_cursor_icon(winit_cursor_icon).await;
             } else {
-                window.set_cursor_visible(false);
+                window.set_cursor_visible(false).await;
             }
         } else {
             // Remember to set the cursor again once the cursor returns to the screen:
@@ -878,23 +1234,23 @@ impl State {
 /// Update the given viewport info with the current state of the window.
 ///
 /// Call before [`State::take_egui_input`].
-pub fn update_viewport_info(
+pub async fn update_viewport_info<TS: async_winit::ThreadSafety>(
     viewport_info: &mut ViewportInfo,
     egui_ctx: &egui::Context,
-    window: &Window,
+    window: &Window<TS>,
 ) {
     crate::profile_function!();
 
     let pixels_per_point = pixels_per_point(egui_ctx, window);
 
-    let has_a_position = match window.is_minimized() {
+    let has_a_position = match window.is_minimized().await {
         None | Some(true) => false,
         Some(false) => true,
     };
 
     let inner_pos_px = if has_a_position {
         window
-            .inner_position()
+            .inner_position().await
             .map(|pos| Pos2::new(pos.x as f32, pos.y as f32))
             .ok()
     } else {
@@ -903,7 +1259,7 @@ pub fn update_viewport_info(
 
     let outer_pos_px = if has_a_position {
         window
-            .outer_position()
+            .outer_position().await
             .map(|pos| Pos2::new(pos.x as f32, pos.y as f32))
             .ok()
     } else {
@@ -911,14 +1267,14 @@ pub fn update_viewport_info(
     };
 
     let inner_size_px = if has_a_position {
-        let size = window.inner_size();
+        let size = window.inner_size().await;
         Some(Vec2::new(size.width as f32, size.height as f32))
     } else {
         None
     };
 
     let outer_size_px = if has_a_position {
-        let size = window.outer_size();
+        let size = window.outer_size().await;
         Some(Vec2::new(size.width as f32, size.height as f32))
     } else {
         None
@@ -941,7 +1297,7 @@ pub fn update_viewport_info(
 
     let monitor_size = {
         crate::profile_scope!("monitor_size");
-        if let Some(monitor) = window.current_monitor() {
+        if let Some(monitor) = window.current_monitor().await {
             let size = monitor.size().to_logical::<f32>(pixels_per_point.into());
             Some(egui::vec2(size.width, size.height))
         } else {
@@ -950,19 +1306,19 @@ pub fn update_viewport_info(
     };
 
     viewport_info.focused = Some(window.has_focus());
-    viewport_info.fullscreen = Some(window.fullscreen().is_some());
+    viewport_info.fullscreen = Some(window.fullscreen().await.is_some());
     viewport_info.inner_rect = inner_rect;
     viewport_info.monitor_size = monitor_size;
     viewport_info.native_pixels_per_point = Some(window.scale_factor() as f32);
     viewport_info.outer_rect = outer_rect;
-    viewport_info.title = Some(window.title());
+    viewport_info.title = Some(window.title().await);
 
     if cfg!(target_os = "windows") {
         // It's tempting to do this, but it leads to a deadlock on Mac when running
         // `cargo run -p custom_window_frame`.
         // See https://github.com/emilk/egui/issues/3494
-        viewport_info.maximized = Some(window.is_maximized());
-        viewport_info.minimized = Some(window.is_minimized().unwrap_or(false));
+        viewport_info.maximized = Some(window.is_maximized().await);
+        viewport_info.minimized = Some(window.is_minimized().await.unwrap_or(false));
     }
 }
 
@@ -1262,11 +1618,11 @@ fn translate_cursor(cursor_icon: egui::CursorIcon) -> Option<winit::window::Curs
 // Helpers for egui Viewports
 // ---------------------------------------------------------------------------
 
-pub fn process_viewport_commands(
+pub async fn process_viewport_commands<TS: async_winit::ThreadSafety>(
     egui_ctx: &egui::Context,
     info: &mut ViewportInfo,
     commands: impl IntoIterator<Item = ViewportCommand>,
-    window: &Window,
+    window: &Window<TS>,
     is_viewport_focused: bool,
     screenshot_requested: &mut bool,
 ) {
@@ -1278,13 +1634,13 @@ pub fn process_viewport_commands(
             info,
             is_viewport_focused,
             screenshot_requested,
-        );
+        ).await;
     }
 }
 
-fn process_viewport_command(
+async fn process_viewport_command<TS: async_winit::ThreadSafety>(
     egui_ctx: &egui::Context,
-    window: &Window,
+    window: &Window<TS>,
     command: ViewportCommand,
     info: &mut ViewportInfo,
     is_viewport_focused: bool,
@@ -1312,7 +1668,7 @@ fn process_viewport_command(
             // or we will have bugs on Windows.
             // See https://github.com/emilk/egui/pull/1108
             if is_viewport_focused {
-                if let Err(err) = window.drag_window() {
+                if let Err(err) = window.drag_window().await {
                     log::warn!("{command:?}: {err}");
                 }
             }
@@ -1337,37 +1693,43 @@ fn process_viewport_command(
                 egui::viewport::ResizeDirection::SouthEast => ResizeDirection::SouthEast,
                 egui::viewport::ResizeDirection::NorthWest => ResizeDirection::NorthWest,
                 egui::viewport::ResizeDirection::SouthWest => ResizeDirection::SouthWest,
-            }) {
+            }).await {
                 log::warn!("{command:?}: {err}");
             }
         }
         ViewportCommand::Title(title) => {
-            window.set_title(&title);
+            window.set_title(&title).await;
         }
-        ViewportCommand::Transparent(v) => window.set_transparent(v),
-        ViewportCommand::Visible(v) => window.set_visible(v),
+        ViewportCommand::Transparent(v) => window.set_transparent(v).await,
+        ViewportCommand::Visible(v) => window.set_visible(v).await,
         ViewportCommand::OuterPosition(pos) => {
             window.set_outer_position(PhysicalPosition::new(
                 pixels_per_point * pos.x,
                 pixels_per_point * pos.y,
-            ));
+            )).await;
         }
         ViewportCommand::MinInnerSize(s) => {
-            window.set_min_inner_size((s.is_finite() && s != Vec2::ZERO).then_some(
-                PhysicalSize::new(pixels_per_point * s.x, pixels_per_point * s.y),
-            ));
+            window
+                .set_min_inner_size((s.is_finite() && s != Vec2::ZERO).then_some(
+                    PhysicalSize::new(pixels_per_point * s.x, pixels_per_point * s.y).into(),
+                ))
+                .await;
         }
         ViewportCommand::MaxInnerSize(s) => {
-            window.set_max_inner_size((s.is_finite() && s != Vec2::INFINITY).then_some(
-                PhysicalSize::new(pixels_per_point * s.x, pixels_per_point * s.y),
-            ));
+            window
+                .set_max_inner_size((s.is_finite() && s != Vec2::INFINITY).then_some(
+                    PhysicalSize::new(pixels_per_point * s.x, pixels_per_point * s.y).into(),
+                ))
+                .await;
         }
         ViewportCommand::ResizeIncrements(s) => {
-            window.set_resize_increments(
-                s.map(|s| PhysicalSize::new(pixels_per_point * s.x, pixels_per_point * s.y)),
-            );
+            window
+                .set_resize_increments(s.map(|s| {
+                    PhysicalSize::new(pixels_per_point * s.x, pixels_per_point * s.y).into()
+                }))
+                .await;
         }
-        ViewportCommand::Resizable(v) => window.set_resizable(v),
+        ViewportCommand::Resizable(v) => window.set_resizable(v).await,
         ViewportCommand::EnableButtons {
             close,
             minimized,
@@ -1388,25 +1750,25 @@ fn process_viewport_command(
             },
         ),
         ViewportCommand::Minimized(v) => {
-            window.set_minimized(v);
+            window.set_minimized(v).await;
             info.minimized = Some(v);
         }
         ViewportCommand::Maximized(v) => {
-            window.set_maximized(v);
+            window.set_maximized(v).await;
             info.maximized = Some(v);
         }
         ViewportCommand::Fullscreen(v) => {
-            window.set_fullscreen(v.then_some(winit::window::Fullscreen::Borderless(None)));
+            window.set_fullscreen(v.then_some(winit::window::Fullscreen::Borderless(None))).await;
         }
-        ViewportCommand::Decorations(v) => window.set_decorations(v),
+        ViewportCommand::Decorations(v) => window.set_decorations(v).await,
         ViewportCommand::WindowLevel(l) => window.set_window_level(match l {
             egui::viewport::WindowLevel::AlwaysOnBottom => WindowLevel::AlwaysOnBottom,
             egui::viewport::WindowLevel::AlwaysOnTop => WindowLevel::AlwaysOnTop,
             egui::viewport::WindowLevel::Normal => WindowLevel::Normal,
-        }),
+        }).await,
         ViewportCommand::Icon(icon) => {
             let winit_icon = icon.and_then(|icon| to_winit_icon(&icon));
-            window.set_window_icon(winit_icon);
+            window.set_window_icon(winit_icon).await;
         }
         ViewportCommand::IMERect(rect) => {
             window.set_ime_cursor_area(
@@ -1417,15 +1779,15 @@ fn process_viewport_command(
                 ),
             );
         }
-        ViewportCommand::IMEAllowed(v) => window.set_ime_allowed(v),
+        ViewportCommand::IMEAllowed(v) => window.set_ime_allowed(v).await,
         ViewportCommand::IMEPurpose(p) => window.set_ime_purpose(match p {
             egui::viewport::IMEPurpose::Password => winit::window::ImePurpose::Password,
             egui::viewport::IMEPurpose::Terminal => winit::window::ImePurpose::Terminal,
             egui::viewport::IMEPurpose::Normal => winit::window::ImePurpose::Normal,
-        }),
+        }).await,
         ViewportCommand::Focus => {
             if !window.has_focus() {
-                window.focus_window();
+                window.focus_window().await;
             }
         }
         ViewportCommand::RequestUserAttention(a) => {
@@ -1437,19 +1799,19 @@ fn process_viewport_command(
                 egui::UserAttentionType::Informational => {
                     Some(winit::window::UserAttentionType::Informational)
                 }
-            });
+            }).await;
         }
         ViewportCommand::SetTheme(t) => window.set_theme(match t {
             egui::SystemTheme::Light => Some(winit::window::Theme::Light),
             egui::SystemTheme::Dark => Some(winit::window::Theme::Dark),
             egui::SystemTheme::SystemDefault => None,
-        }),
-        ViewportCommand::ContentProtected(v) => window.set_content_protected(v),
+        }).await,
+        ViewportCommand::ContentProtected(v) => window.set_content_protected(v).await,
         ViewportCommand::CursorPosition(pos) => {
             if let Err(err) = window.set_cursor_position(PhysicalPosition::new(
                 pixels_per_point * pos.x,
                 pixels_per_point * pos.y,
-            )) {
+            )).await {
                 log::warn!("{command:?}: {err}");
             }
         }
@@ -1458,13 +1820,13 @@ fn process_viewport_command(
                 egui::viewport::CursorGrab::None => CursorGrabMode::None,
                 egui::viewport::CursorGrab::Confined => CursorGrabMode::Confined,
                 egui::viewport::CursorGrab::Locked => CursorGrabMode::Locked,
-            }) {
+            }).await {
                 log::warn!("{command:?}: {err}");
             }
         }
-        ViewportCommand::CursorVisible(v) => window.set_cursor_visible(v),
+        ViewportCommand::CursorVisible(v) => window.set_cursor_visible(v).await,
         ViewportCommand::MousePassthrough(passthrough) => {
-            if let Err(err) = window.set_cursor_hittest(!passthrough) {
+            if let Err(err) = window.set_cursor_hittest(!passthrough).await {
                 log::warn!("{command:?}: {err}");
             }
         }
@@ -1477,26 +1839,26 @@ fn process_viewport_command(
 /// Build and intitlaize a window.
 ///
 /// Wrapper around `create_winit_window_builder` and `apply_viewport_builder_to_window`.
-pub fn create_window<T>(
+pub async fn create_window<TS: async_winit::ThreadSafety>(
     egui_ctx: &egui::Context,
-    event_loop: &EventLoopWindowTarget<T>,
+    event_loop: &EventLoopWindowTarget<TS>,
     viewport_builder: &ViewportBuilder,
-) -> Result<Window, winit::error::OsError> {
+) -> Result<Window<TS>, async_winit::error::OsError> {
     crate::profile_function!();
 
     let window_builder =
-        create_winit_window_builder(egui_ctx, event_loop, viewport_builder.clone());
+        create_winit_window_builder(egui_ctx, event_loop, viewport_builder.clone()).await;
     let window = {
         crate::profile_scope!("WindowBuilder::build");
-        window_builder.build(event_loop)?
+        window_builder.build().await?
     };
-    apply_viewport_builder_to_window(egui_ctx, &window, viewport_builder);
+    apply_viewport_builder_to_window(egui_ctx, &window, viewport_builder).await;
     Ok(window)
 }
 
-pub fn create_winit_window_builder<T>(
+pub async fn create_winit_window_builder<TS: async_winit::ThreadSafety>(
     egui_ctx: &egui::Context,
-    event_loop: &EventLoopWindowTarget<T>,
+    event_loop: &EventLoopWindowTarget<TS>,
     viewport_builder: ViewportBuilder,
 ) -> winit::window::WindowBuilder {
     crate::profile_function!();
@@ -1505,16 +1867,20 @@ pub fn create_winit_window_builder<T>(
     // zoom_factor and the native pixels per point, so we need to know that here.
     // We don't know what monitor the window will appear on though, but
     // we'll try to fix that after the window is created in the vall to `apply_viewport_builder_to_window`.
-    let native_pixels_per_point = event_loop
-        .primary_monitor()
-        .or_else(|| event_loop.available_monitors().next())
-        .map_or_else(
-            || {
-                log::debug!("Failed to find a monitor - assuming native_pixels_per_point of 1.0");
-                1.0
-            },
-            |m| m.scale_factor() as f32,
-        );
+    let pm = event_loop.primary_monitor().await;
+    let monitor = if pm.is_some() {
+        pm
+    } else {
+        event_loop.available_monitors().await.next()
+    };
+
+    let native_pixels_per_point = monitor.map_or_else(
+        || {
+            log::debug!("Failed to find a monitor - assuming native_pixels_per_point of 1.0");
+            1.0
+        },
+        |m| m.scale_factor() as f32,
+    );
     let zoom_factor = egui_ctx.zoom_factor();
     let pixels_per_point = zoom_factor * native_pixels_per_point;
 
@@ -1689,13 +2055,13 @@ fn to_winit_icon(icon: &egui::IconData) -> Option<winit::window::Icon> {
 }
 
 /// Applies what `create_winit_window_builder` couldn't
-pub fn apply_viewport_builder_to_window(
+pub async fn apply_viewport_builder_to_window<TS: async_winit::ThreadSafety>(
     egui_ctx: &egui::Context,
-    window: &Window,
+    window: &Window<TS>,
     builder: &ViewportBuilder,
 ) {
     if let Some(mouse_passthrough) = builder.mouse_passthrough {
-        if let Err(err) = window.set_cursor_hittest(!mouse_passthrough) {
+        if let Err(err) = window.set_cursor_hittest(!mouse_passthrough).await {
             log::warn!("set_cursor_hittest failed: {err}");
         }
     }
@@ -1720,20 +2086,22 @@ pub fn apply_viewport_builder_to_window(
             }
         }
         if let Some(size) = builder.min_inner_size {
-            window.set_min_inner_size(Some(PhysicalSize::new(
-                pixels_per_point * size.x,
-                pixels_per_point * size.y,
-            )));
+            window
+                .set_min_inner_size(Some(
+                    PhysicalSize::new(pixels_per_point * size.x, pixels_per_point * size.y).into(),
+                ))
+                .await;
         }
         if let Some(size) = builder.max_inner_size {
-            window.set_max_inner_size(Some(PhysicalSize::new(
-                pixels_per_point * size.x,
-                pixels_per_point * size.y,
-            )));
+            window
+                .set_max_inner_size(Some(
+                    PhysicalSize::new(pixels_per_point * size.x, pixels_per_point * size.y).into(),
+                ))
+                .await;
         }
         if let Some(pos) = builder.position {
             let pos = PhysicalPosition::new(pixels_per_point * pos.x, pixels_per_point * pos.y);
-            window.set_outer_position(pos);
+            window.set_outer_position(pos).await;
         }
     }
 }

@@ -18,7 +18,7 @@ all-features = true
 
 
 [features]
-default = ["clipboard", "links", "wayland", "winit/default", "x11"]
+default = ["clipboard", "links", "wayland", "async-winit/default", "x11"]
 
 ## Enable platform accessibility API implementations through [AccessKit](https://accesskit.dev/).
 accesskit = ["accesskit_winit", "egui/accesskit"]
@@ -28,9 +28,9 @@ accesskit = ["accesskit_winit", "egui/accesskit"]
 #   rely on Winit to pull in a suitable version (unlike most Rust crates, any version conflicts won't link)
 # - It's also important that we don't impose an android-activity backend by taking this choice away from applications.
 ## Enable the `game-activity` backend via Winit on Android
-android-game-activity = ["winit/android-game-activity"]
+android-game-activity = ["async-winit/android-game-activity"]
 ## Enable the `native-activity` backend via Winit on Android
-android-native-activity = ["winit/android-native-activity"]
+android-native-activity = ["async-winit/android-native-activity"]
 
 ## [`bytemuck`](https://docs.rs/bytemuck) enables you to cast [`egui::epaint::Vertex`], [`egui::Vec2`] etc to `&[u8]`.
 bytemuck = ["egui/bytemuck"]
@@ -49,17 +49,18 @@ puffin = ["dep:puffin", "egui/puffin"]
 serde = ["egui/serde", "dep:serde"]
 
 ## Enables Wayland support.
-wayland = ["winit/wayland", "bytemuck"]
+wayland = ["async-winit/wayland", "bytemuck"]
 
 ## Enables compiling for x11.
-x11 = ["winit/x11", "bytemuck"]
+x11 = ["async-winit/x11", "bytemuck"]
 
 [dependencies]
 egui = { workspace = true, default-features = false, features = ["log"] }
 log.workspace = true
+parking_lot.workspace = true
 raw-window-handle.workspace = true
 web-time.workspace = true
-winit = { workspace = true, default-features = false, features = ["rwh_06"] }
+async-winit = { workspace = true, default-features = false, features = ["thread_safe"] }
 
 #! ### Optional dependencies
 
