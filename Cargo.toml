@@ -80,7 +80,6 @@ wgpu = { version = "0.20.0", default-features = false, features = [
     # Make the renderer `Sync` even on wasm32, because it makes the code simpler:
     "fragile-send-sync-non-atomic-wasm",
 ] }
-winit = { version = "0.29.15", default-features = false }
 async-winit = { git = "https://github.com/uglyoldbob/async-winit.git", default-features = false }
 
 

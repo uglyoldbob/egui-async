@@ -30,27 +30,30 @@ default = []
 ## enable cut/copy/paste to os clipboard.
 ##
 ## if disabled a clipboard will be simulated so you can still copy/paste within the egui app.
-clipboard = ["egui-winit?/clipboard"]
+clipboard = ["egui-async-winit?/clipboard"]
 
 ## For the `winit` integration:
 ## enable opening links in a browser when an egui hyperlink is clicked.
-links = ["egui-winit?/links"]
+links = ["egui-async-winit?/links"]
 
 ## Enable profiling with the [`puffin`](https://docs.rs/puffin) crate.
-puffin = ["dep:puffin", "egui-winit?/puffin", "egui/puffin"]
+puffin = ["dep:puffin", "egui-async-winit?/puffin", "egui/puffin"]
+
+rwh_05 = [ "async-winit/rwh_05" ]
 
 ## Enable [`winit`](https://docs.rs/winit) integration. On Linux, requires either `wayland` or `x11`
-winit = ["egui-winit", "dep:winit"]
+winit = ["egui-async-winit", "dep:async-winit"]
 
 ## Enables Wayland support for winit.
-wayland = ["winit?/wayland"]
+wayland = ["async-winit?/wayland"]
 
 ## Enables x11 support for winit.
-x11 = ["winit?/x11"]
+x11 = ["async-winit?/x11"]
 
 
 [dependencies]
 egui = { workspace = true, default-features = false, features = ["bytemuck"] }
+parking_lot.workspace = true
 
 bytemuck = "1.7"
 glow.workspace = true
@@ -63,11 +66,9 @@ document-features = { workspace = true, optional = true }
 
 # Native:
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-egui-winit = { workspace = true, optional = true, default-features = false }
+egui-async-winit = { workspace = true, optional = true, default-features = false }
 puffin = { workspace = true, optional = true }
-winit = { workspace = true, optional = true, default-features = false, features = [
-  "rwh_06", # for compatibility with egui-winit
-] }
+async-winit = { workspace = true, optional = true, default-features = false }
 
 # Web:
 [target.'cfg(target_arch = "wasm32")'.dependencies]

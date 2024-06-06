@@ -1,15 +1,20 @@
-pub use egui_winit;
+use parking_lot::Mutex;
+use std::sync::Arc;
+
+use egui_async_winit as egui_winit;
+
+pub use egui_async_winit;
 pub use egui_winit::EventResponse;
 
 use egui::{ViewportId, ViewportOutput};
-use egui_winit::winit;
+use egui_async_winit::winit as winit;
 
 use crate::shader_version::ShaderVersion;
 
 /// Use [`egui`] from a [`glow`] app based on [`winit`].
 pub struct EguiGlow {
     pub egui_ctx: egui::Context,
-    pub egui_winit: egui_winit::State,
+    pub egui_winit: Arc<Mutex<egui_async_winit::State>>,
     pub painter: crate::Painter,
 
     viewport_info: egui::ViewportInfo,
@@ -22,8 +27,8 @@ pub struct EguiGlow {
 
 impl EguiGlow {
     /// For automatic shader version detection set `shader_version` to `None`.
-    pub fn new<E>(
-        event_loop: &winit::event_loop::EventLoopWindowTarget<E>,
+    pub fn new<TS: winit::ThreadSafety>(
+        event_loop: &winit::event_loop::EventLoopWindowTarget<TS>,
         gl: std::sync::Arc<glow::Context>,
         shader_version: Option<ShaderVersion>,
         native_pixels_per_point: Option<f32>,
@@ -46,7 +51,7 @@ impl EguiGlow {
 
         Self {
             egui_ctx,
-            egui_winit,
+            egui_winit: Arc::new(Mutex::new(egui_winit)),
             painter,
             viewport_info: Default::default(),
             shapes: Default::default(),
@@ -55,17 +60,17 @@ impl EguiGlow {
         }
     }
 
-    pub fn on_window_event(
+    pub fn on_window_event<TS: winit::ThreadSafety>(
         &mut self,
-        window: &winit::window::Window,
+        window: &winit::window::Window<TS>,
         event: &winit::event::WindowEvent,
     ) -> EventResponse {
-        self.egui_winit.on_window_event(window, event)
+        self.egui_winit.lock().on_window_event(window, event)
     }
 
     /// Call [`Self::paint`] later to paint.
-    pub fn run(&mut self, window: &winit::window::Window, run_ui: impl FnMut(&egui::Context)) {
-        let raw_input = self.egui_winit.take_egui_input(window);
+    pub async fn run<TS: winit::ThreadSafety>(&mut self, window: &winit::window::Window<TS>, run_ui: impl FnMut(&egui::Context)) {
+        let raw_input = self.egui_winit.lock().take_egui_input(window).await;
 
         let egui::FullOutput {
             platform_output,
@@ -93,7 +98,7 @@ impl EguiGlow {
             }
         }
 
-        self.egui_winit
+        self.egui_winit.lock()
             .handle_platform_output(window, platform_output);
 
         self.shapes = shapes;
@@ -102,7 +107,7 @@ impl EguiGlow {
     }
 
     /// Paint the results of the last call to [`Self::run`].
-    pub fn paint(&mut self, window: &winit::window::Window) {
+    pub async fn paint<TS: winit::ThreadSafety>(&mut self, window: &winit::window::Window<TS>) {
         let shapes = std::mem::take(&mut self.shapes);
         let mut textures_delta = std::mem::take(&mut self.textures_delta);
 
@@ -112,7 +117,7 @@ impl EguiGlow {
 
         let pixels_per_point = self.pixels_per_point;
         let clipped_primitives = self.egui_ctx.tessellate(shapes, pixels_per_point);
-        let dimensions: [u32; 2] = window.inner_size().into();
+        let dimensions: [u32; 2] = window.inner_size().await.into();
         self.painter
             .paint_primitives(dimensions, pixels_per_point, &clipped_primitives);
 
